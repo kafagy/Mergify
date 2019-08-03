@@ -46,19 +46,6 @@ def im_convert(tensor):
 
     return image
 
-# helper function for un-normalizing an image 
-# and converting it from a Tensor image to a NumPy image for display
-def im_convert(tensor):
-    """ Display a tensor as an image. """
-    
-    image = tensor.to("cpu").clone().detach()
-    image = image.numpy().squeeze()
-    image = image.transpose(1,2,0)
-    image = image * np.array((0.229, 0.224, 0.225)) + np.array((0.485, 0.456, 0.406))
-    image = image.clip(0, 1)
-
-    return image
-
 def gram_matrix(tensor):
     """ Calculate the Gram Matrix of a given tensor 
         Gram Matrix: https://en.wikipedia.org/wiki/Gramian_matrix
@@ -117,10 +104,11 @@ vgg.to(device)
 ######################################
 ## Load in Content and Style Images ##
 ######################################
+
 # load in content and style image
-content = load_image('content.jpg').to(device)
+content = load_image(content).to(device)
 # Resize style to match content, makes code easier
-style = load_image('style.jpg', shape=content.shape[-2:]).to(device)
+style = load_image(style, shape=content.shape[-2:]).to(device)
   
 # display the images
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 10))

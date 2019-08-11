@@ -1,4 +1,5 @@
 import os
+import time
 import torch
 import numpy as np
 from PIL import Image
@@ -6,20 +7,31 @@ import torch.optim as optim
 import matplotlib.pyplot as plt
 from torchvision import transforms, models
 from werkzeug.utils import secure_filename
-from flask import Flask, render_template, request, redirect, flash, send_from_directory
+from flask import Flask, render_template, request, redirect, flash, send_from_directory, url_for, Response, session
 
+hostname = 'kafagy.ddns.net'
+#hostname = '127.0.0.1'
+port = 9201
 app = Flask(__name__)
 app.debug = True
-basedir = os.path.abspath(os.path.dirname(__file__))
+UPLOAD_FOLDER = './uploads'
 app.secret_key = 'why would I tell you my secret key?'
-app.config['UPLOAD_FOLDER'] = os.path.join(basedir, 'uploads')
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg'}
 
 def allowed_file(filenames):
 	return '.' in filenames[0] and '.' in filenames[1] and filenames[0].rsplit('.', 1)[1].lower() and filenames[1].rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
+# force browser to hold no cache. Otherwise old result might return.
+@app.after_request
+def set_response_headers(response):
+	response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+	response.headers['Pragma'] = 'no-cache'
+	response.headers['Expires'] = '0'
+	return response
+
 @app.route('/')
-def upload():
+def result():
 	return render_template('index.html')
 
 @app.route('/', methods = ['GET', 'POST'])
@@ -36,11 +48,22 @@ def upload_file():
 			for file in request.files.getlist('file'):
 				file.save(os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(file.filename)))
 			print('Content Image: ' + files[0] + '*******' + ' Style Image: ' + files[1])
-			combine(os.path.join(app.config['UPLOAD_FOLDER'], files[0]), os.path.join(app.config['UPLOAD_FOLDER'], files[1]))
+			session['content'] = os.path.join(app.config['UPLOAD_FOLDER'], files[0])
+			session['style'] = os.path.join(app.config['UPLOAD_FOLDER'], files[1])
+			return redirect(url_for('train'))
+
+@app.route('/show')
+def show():
+	return redirect(url_for('uploaded_file', filename='result.png'))
+
+@app.route('/show/<filename>')
+def uploaded_file(filename):
+	filename = 'http://{}:{}/uploads/'.format(hostname, port) + filename
+	return render_template('result.html', filename=filename)
 
 @app.route('/uploads/<filename>')
-def uploaded_file(filename):
-	return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+def send_file(filename):
+	return send_from_directory(UPLOAD_FOLDER, filename)
 
 def load_image(img_path, max_size=400, shape=None):
 	""" Load in and transform an image, making sure the image
@@ -61,7 +84,7 @@ def load_image(img_path, max_size=400, shape=None):
 						transforms.Resize(size),
 						transforms.ToTensor(),
 						transforms.Normalize((0.485, 0.456, 0.406),
-											 (0.229, 0.224, 0.225))])
+								 (0.229, 0.224, 0.225))])
 	# discard the transparent, alpha channel (that's the :3) and add the batch dimension
 	image = in_transform(image)[:3,:,:].unsqueeze(0)
 
@@ -120,7 +143,14 @@ def get_features(image, model, layers=None):
 
 	return features
 
-def combine(content, style):
+@app.route('/train')
+def train():
+	return 	render_template('training.html')
+
+@app.route('/training', methods = ['GET', 'POST'])
+def training():
+	content = session.get('content', None)
+	style = session.get('style', None)
 	# get the "features" portion of VGG19 (we will not need the "classifier" portion)
 	vgg = models.vgg19(pretrained=True).features
 
@@ -175,38 +205,39 @@ def combine(content, style):
 
 	# iteration hyperparameters
 	optimizer = optim.Adam([target], lr=0.003)
-	steps = 2000  # decide how many iterations to update your image (5000)
 
-	for ii in range(1, steps+1):
-		print(ii)
-		target_features = get_features(target, vgg) # get the features from your target image
-		content_loss = torch.mean((target_features['conv4_2'] - content_features['conv4_2'])**2)     # the content loss
-		style_loss = 0 # initialize the style loss to 0
-		for layer in style_weights: # then add to it for each layer's gram matrix loss
-			target_feature = target_features[layer] # get the "target" style representation for the layer
-			target_gram = gram_matrix(target_feature)
-			_, d, h, w = target_feature.shape
-			style_gram = style_grams[layer] # get the "style" style representation
-			layer_style_loss = style_weights[layer] * torch.mean((target_gram - style_gram)**2) # the style loss for one layer, weighted appropriately
-			style_loss += layer_style_loss / (d * h * w) # add to the style loss
-		total_loss = content_weight * content_loss + style_weight * style_loss     # calculate the *total* loss
+	def progress():
+		steps = 2000  # decide how many iterations to update your image (5000)
+		ii = 0
+		while ii <= steps:
+			print(ii)
+			yield "data:" + str(ii) + "\n\n"
+			target_features = get_features(target, vgg) # get the features from your target image
+			content_loss = torch.mean((target_features['conv4_2'] - content_features['conv4_2'])**2)     # the content loss
+			style_loss = 0 # initialize the style loss to 0
+			for layer in style_weights: # then add to it for each layer's gram matrix loss
+				target_feature = target_features[layer] # get the "target" style representation for the layer
+				target_gram = gram_matrix(target_feature)
+				_, d, h, w = target_feature.shape
+				style_gram = style_grams[layer] # get the "style" style representation
+				layer_style_loss = style_weights[layer] * torch.mean((target_gram - style_gram)**2) # the style loss for one layer, weighted appropriately
+				style_loss += layer_style_loss / (d * h * w) # add to the style loss
+			total_loss = content_weight * content_loss + style_weight * style_loss     # calculate the *total* loss
 
-		# update your target image
-		optimizer.zero_grad()
-		total_loss.backward()
-		optimizer.step()
+			# update your target image
+			optimizer.zero_grad()
+			total_loss.backward()
+			optimizer.step()
 
-		# display intermediate images and print the loss
-		if  ii % show_every == 0:
-			print('Total loss: ', total_loss.item())
-			plt.imshow(im_convert(target))
-			plt.show()
-
-	plt.imsave('result.png', im_convert(target))
-
-	return send_from_directory(app.config['UPLOAD_FOLDER'], 'result.png') # Supposed to be an image
+			# display intermediate images and print the loss
+			if  ii % show_every == 0:
+				print('Total loss: ', total_loss.item())
+				plt.imshow(im_convert(target))
+				plt.show()
+			ii += 1
+		plt.imsave(os.path.join(app.config['UPLOAD_FOLDER'], 'result.png'), im_convert(target))
+	return Response(progress(), mimetype='text/event-stream')
 
 if __name__ == '__main__':
-	app.run(host='0.0.0.0', port=9201)
-
+	app.run(host='0.0.0.0', port=9201, threaded=True)
 
